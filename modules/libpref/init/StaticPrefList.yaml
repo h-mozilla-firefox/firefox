@@ -17375,7 +17375,7 @@
 # designed to minimize breakage while maximizing protection.
 - name: privacy.fingerprintingProtection
   type: RelaxedAtomicBool
-  value: false
+  value: true
   mirror: always
   do_not_use_directly: true
 
