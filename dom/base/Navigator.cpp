@@ -2356,7 +2356,7 @@ bool Navigator::Webdriver() {
     bool marionetteRunning = false;
     marionette->GetRunning(&marionetteRunning);
     if (marionetteRunning) {
-      return true;
+      //return true;
     }
   }
 
@@ -2365,7 +2365,7 @@ bool Navigator::Webdriver() {
     bool remoteAgentRunning = false;
     agent->GetRunning(&remoteAgentRunning);
     if (remoteAgentRunning) {
-      return true;
+      //return true;
     }
   }
 #endif

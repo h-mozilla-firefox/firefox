@@ -3876,15 +3876,15 @@ const gRemoteControl = {
         excludeBrowserToolboxSockets: true,
       })
     ) {
-      return "DevTools";
+      //return "DevTools";
     }
 
     if (Marionette.running) {
-      return "Marionette";
+      //return "Marionette";
     }
 
     if (RemoteAgent.running) {
-      return "RemoteAgent";
+      //return "RemoteAgent";
     }
 
     return null;
