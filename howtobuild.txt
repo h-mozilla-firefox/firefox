@@ -1,0 +1,30 @@
+﻿0,安装MozillaBuild
+https://firefox-source-docs.mozilla.org/setup/windows_build.html
+1，clone firefox代码
+2,mach.cmd bootstrap
+Note on Artifact Mode:
+
+Artifact builds download prebuilt C++ components rather than building
+them locally. Artifact builds are faster!
+
+Artifact builds are recommended for people working on Firefox or
+Firefox for Android frontends, or the GeckoView Java API. They are unsuitable
+for those working on C++ code. For more information see:
+https://firefox-source-docs.mozilla.org/contributing/build/artifact_builds.html.
+
+Please choose the version of Firefox you want to build (see note above):
+  1. Firefox for Desktop Artifact Mode [default]
+  2. Firefox for Desktop
+  3. GeckoView/Firefox for Android Artifact Mode
+  4. GeckoView/Firefox for Android
+  5. SpiderMonkey JavaScript engine
+Your choice: 2
+Checking for Dev Drive...
+Your version of Rust (1.93.1) is new enough.
+Rust supports i686-pc-windows-msvc, x86_64-pc-windows-msvc targets.
+Will you be using agentic coding tools to work on Firefox? (Yn): n
+Will you be submitting commits to Mozilla? (Yn): n
+
+
+3,mach.cmd build
+
