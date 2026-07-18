@@ -617,6 +617,17 @@ class nsHttpChannel final : public HttpBaseChannel,
 
   uint64_t mLogicalOffset{0};
 
+  // MozNetLogger: per-request log state
+  nsCString mMozLogBody;
+  nsCString mMozLogRequestHeaders;
+  nsCString mMozLogResponseHeaders;
+  nsCString mMozLogMethod;
+  nsCString mMozLogHost;
+  nsCString mMozLogTimestamp;
+  nsCString mMozLogSaveDir;
+  uint32_t mMozLogResponseStatus{0};
+  bool mMozLogEnabled{false};
+
   // cache specific data
   nsCOMPtr<nsICacheEntry> mCacheEntry;
   // This will be set during OnStopRequest() before calling CloseCacheEntry(),

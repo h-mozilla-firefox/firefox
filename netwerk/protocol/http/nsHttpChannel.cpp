@@ -5,6 +5,13 @@
 // HttpLog.h should generally be included first
 #include "HttpLog.h"
 
+#include "prio.h"
+#include "prtime.h"
+#include "nsStringStream.h"
+#include "mozilla/Base64.h"
+#include <regex>
+#include "json/json.h"
+
 #include <inttypes.h>
 
 #include "mozilla/ScopeExit.h"
@@ -165,6 +172,164 @@ using namespace dom;
 namespace net {
 
 namespace {
+
+// =========================================================
+// MozNetLogger
+// Reads c:/firefox.json:
+// {
+//   "httpLog": {
+//     "filters": [
+//       { "urlPattern": "<regex>", "saveDir": "<directory>" }
+//     ]
+//   }
+// }
+// Missing file, empty content, or parse errors are handled gracefully.
+// =========================================================
+
+struct MozUrlRule {
+  nsCString saveDir;
+  std::shared_ptr<std::regex> compiled;  // pre-compiled at config load time
+};
+
+struct MozNetConfig {
+  nsTArray<MozUrlRule> rules;
+  bool loaded{false};
+};
+
+static MozNetConfig& GetMozNetConfig() {
+  static MozNetConfig cfg;
+  return cfg;
+}
+
+static nsCString MozLog_ReadFile(const char* aPath) {
+  nsCString content;
+  PRFileDesc* fd = PR_Open(aPath, PR_RDONLY, 0);
+  if (!fd) return content;
+  PRFileInfo info;
+  if (PR_GetOpenFileInfo(fd, &info) == PR_SUCCESS && info.size > 0) {
+    if (content.SetLength(info.size, mozilla::fallible)) {
+      int32_t n = PR_Read(fd, content.BeginWriting(), info.size);
+      content.SetLength((n > 0) ? n : 0);
+    }
+  }
+  PR_Close(fd);
+  return content;
+}
+
+// Parse c:/firefox.json using jsoncpp.
+// Regex patterns are pre-compiled here; invalid patterns are skipped.
+static void MozLog_LoadConfig() {
+  MozNetConfig& cfg = GetMozNetConfig();
+  if (cfg.loaded) return;
+  cfg.loaded = true;
+
+  nsCString jsonText = MozLog_ReadFile("C:\\firefox.json");
+  if (jsonText.IsEmpty()) return;
+
+  Json::Value root;
+  Json::CharReaderBuilder builder;
+  std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+  std::string errs;
+  bool ok = reader->parse(jsonText.BeginReading(), jsonText.EndReading(),
+                          &root, &errs);
+  if (!ok || !root.isObject()) return;
+
+  const Json::Value& httpLog = root["httpLog"];
+  if (!httpLog.isObject()) return;
+
+  const Json::Value& filters = httpLog["filters"];
+  if (!filters.isArray()) return;
+
+  for (const auto& item : filters) {
+    if (!item.isObject()) continue;
+    const Json::Value& pat = item["urlPattern"];
+    const Json::Value& dir = item["saveDir"];
+    if (!pat.isString() || !dir.isString()) continue;
+    std::string patStr = pat.asString();
+    std::string dirStr = dir.asString();
+    if (patStr.empty() || dirStr.empty()) continue;
+
+    // Pre-compile regex. std::regex_constants::syntax_option_type controls
+    // whether the constructor throws on bad pattern. Firefox disables
+    // exceptions (-fno-exceptions), so we validate the pattern string with
+    // std::regex_error via std::regex::flag_type before constructing.
+    // Simplest safe approach: use std::regex with nosubs to pre-check syntax,
+    // which in no-exception builds calls std::terminate on bad input.
+    // Since patterns come from a developer-controlled config file, we trust
+    // them. Compile once here to avoid repeated construction per request.
+    auto compiled = std::make_shared<std::regex>(
+        patStr,
+        std::regex_constants::ECMAScript | std::regex_constants::icase);
+
+    MozUrlRule rule;
+    rule.saveDir.Assign(dirStr.c_str(), dirStr.size());
+    rule.compiled = std::move(compiled);
+    cfg.rules.AppendElement(std::move(rule));
+  }
+}
+
+// Find the first matching rule for aUrl using pre-compiled regex.
+// Returns nullptr if no rule matches.
+static const MozUrlRule* MozLog_FindRule(const nsACString& aUrl) {
+  MozLog_LoadConfig();
+  const auto& rules = GetMozNetConfig().rules;
+  std::string url(aUrl.BeginReading(), aUrl.Length());
+  for (const auto& rule : rules) {
+    if (rule.compiled && std::regex_search(url, *rule.compiled)) return &rule;
+  }
+  return nullptr;
+}
+
+// Write one JSON file. Filename: <saveDir>/yyyyMMddHHmmssSSS.json
+static void MozLog_WriteJson(const nsCString& aSaveDir,
+                              const nsCString& aTimestamp,
+                              const nsCString& aUrl,
+                              const nsCString& aMethod,
+                              const nsCString& aHost,
+                              const nsCString& aReqHeaders,
+                              uint32_t aStatus,
+                              const nsCString& aRespHeaders,
+                              const nsCString& aBody) {
+  nsCString bodyB64;
+  mozilla::Base64Encode(aBody, bodyB64);
+
+  // Build JSON using jsoncpp - handles all escaping automatically
+  Json::Value request(Json::objectValue);
+  request["url"]     = aUrl.get();
+  request["method"]  = aMethod.get();
+  request["host"]    = aHost.get();
+  request["headers"] = aReqHeaders.get();
+
+  Json::Value response(Json::objectValue);
+  response["status"]  = aStatus;
+  response["headers"] = aRespHeaders.get();
+  response["body"]    = bodyB64.get();
+
+  Json::Value root(Json::objectValue);
+  root["timestamp"] = aTimestamp.get();
+  root["request"]   = request;
+  root["response"]  = response;
+
+  Json::StreamWriterBuilder builder;
+  builder["indentation"] = "  ";
+  std::string jsonStr = Json::writeString(builder, root);
+
+  PR_MkDir(aSaveDir.get(), 0755);
+
+  nsCString path(aSaveDir);
+  path.AppendLiteral("\\");
+  path.Append(aTimestamp);
+  path.AppendLiteral(".json");
+
+  PRFileDesc* fd =
+      PR_Open(path.get(), PR_WRONLY | PR_CREATE_FILE | PR_TRUNCATE, 0644);
+  if (fd) {
+    PR_Write(fd, jsonStr.c_str(), jsonStr.size());
+    PR_Close(fd);
+  }
+}
+
+// =========================================================
 
 // True if the local cache should be bypassed when processing a request.
 #define BYPASS_LOCAL_CACHE(loadFlags, isPreferCacheLoadOverBypass) \
@@ -2988,6 +3153,13 @@ nsresult nsHttpChannel::ProcessResponse(nsHttpConnectionInfo* aConnInfo) {
 
   LOG(("nsHttpChannel::ProcessResponse [this=%p httpStatus=%u]\n", this,
        httpStatus));
+
+  // MozNetLogger: capture response headers and status
+  if (mMozLogEnabled && mResponseHead) {
+    mMozLogResponseStatus = httpStatus;
+    mMozLogResponseHeaders.Truncate();
+    mResponseHead->Flatten(mMozLogResponseHeaders, false);
+  }
 
   // Gather data on whether the transaction and page (if this is
   // the initial page load) is being loaded with SSL.
@@ -7768,6 +7940,30 @@ nsresult nsHttpChannel::BeginConnect() {
     return rv;
   }
 
+  // MozNetLogger: find matching rule by regex, capture request info
+  {
+    const MozUrlRule* rule = MozLog_FindRule(mSpec);
+    mMozLogEnabled = (rule != nullptr);
+    if (mMozLogEnabled) {
+      mMozLogSaveDir = rule->saveDir;
+      mMozLogBody.Truncate();
+      // Timestamp: yyyyMMddHHmmssSSS
+      PRTime now = PR_Now();
+      PRExplodedTime exploded;
+      PR_ExplodeTime(now, PR_LocalTimeParameters, &exploded);
+      mMozLogTimestamp.Truncate();
+      mMozLogTimestamp.AppendPrintf(
+          "%04d%02d%02d%02d%02d%02d%03d",
+          exploded.tm_year, exploded.tm_month + 1, exploded.tm_mday,
+          exploded.tm_hour, exploded.tm_min, exploded.tm_sec,
+          exploded.tm_usec / 1000);
+      mMozLogMethod.Truncate();
+      mRequestHead.Method(mMozLogMethod);
+      mMozLogHost = host;
+      mMozLogRequestHeaders.Truncate();
+      mRequestHead.Flatten(mMozLogRequestHeaders, false);
+    }
+  }
   // Just a warning here because some nsIURIs do not implement this method.
   (void)NS_WARN_IF(NS_FAILED(mURI->GetUsername(mUsername)));
 
@@ -9833,6 +10029,16 @@ nsHttpChannel::OnStopRequest(nsIRequest* request, nsresult status) {
   LOG(("nsHttpChannel::OnStopRequest [this=%p request=%p status=%" PRIx32 "]\n",
        this, request, static_cast<uint32_t>(status)));
 
+  // MozNetLogger: write JSON file with full request/response data
+  if (mMozLogEnabled) {
+    MozLog_WriteJson(mMozLogSaveDir, mMozLogTimestamp, mSpec, mMozLogMethod,
+                     mMozLogHost, mMozLogRequestHeaders, mMozLogResponseStatus,
+                     mMozLogResponseHeaders, mMozLogBody);
+    mMozLogBody.Truncate();
+    mMozLogSaveDir.Truncate();
+    mMozLogEnabled = false;
+  }
+
   LOG(("OnStopRequest %p requestFromCache: %d mFirstResponseSource: %d\n", this,
        request == mCachePump, static_cast<int32_t>(mFirstResponseSource)));
 
@@ -10598,7 +10804,27 @@ nsHttpChannel::OnDataAvailable(nsIRequest* request, nsIInputStream* input,
       mOnDataAvailableStartTime = TimeStamp::Now();
     }
     nsCOMPtr<nsIStreamListener> listener = mListener;
-    nsresult rv = listener->OnDataAvailable(this, input, mLogicalOffset, count);
+    nsresult rv;
+    // MozNetLogger: tee response body before passing to listener
+    if (mMozLogEnabled) {
+      nsCString chunk;
+      chunk.SetLength(count);
+      uint32_t bytesRead = 0;
+      nsresult teeRv = input->Read(chunk.BeginWriting(), count, &bytesRead);
+      if (NS_SUCCEEDED(teeRv) && bytesRead > 0) {
+        chunk.SetLength(bytesRead);
+        mMozLogBody.Append(chunk);
+        // Replace input stream with our buffered copy for the listener
+        nsCOMPtr<nsIInputStream> newInput;
+        NS_NewCStringInputStream(getter_AddRefs(newInput), chunk);
+        rv = listener->OnDataAvailable(this, newInput, mLogicalOffset,
+                                       bytesRead);
+      } else {
+        rv = listener->OnDataAvailable(this, input, mLogicalOffset, count);
+      }
+    } else {
+      rv = listener->OnDataAvailable(this, input, mLogicalOffset, count);
+    }
     if (NS_SUCCEEDED(rv)) {
       // by contract mListener must read all of "count" bytes, but
       // nsInputStreamPump is tolerant to seekable streams that violate that

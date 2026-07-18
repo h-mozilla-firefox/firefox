@@ -1,0 +1,18 @@
+{
+  "httpLog": {
+    "filters": [
+      {
+        "urlPattern": "^https://api\\.example\\.com/",
+        "saveDir": "C:\\netlog\\example-api"
+      },
+      {
+        "urlPattern": "/v1/(users|orders)\\b",
+        "saveDir": "C:\\netlog\\v1-endpoints"
+      },
+      {
+        "urlPattern": "\\.(json|xml)(\\?|$)",
+        "saveDir": "C:\\netlog\\data-files"
+      }
+    ]
+  }
+}
